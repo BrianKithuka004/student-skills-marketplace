@@ -1,188 +1,251 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../config/prisma');
 
-const prisma = new PrismaClient();
+// ========== VALIDATION FUNCTIONS ==========
 
-const register = async (req, res) => {
+const validateEmail = (email) => {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+};
+
+const validatePassword = (password) => {
+  const minLength = 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  
+  if (password.length < minLength) {
+    return 'Password must be at least 8 characters';
+  }
+  if (!hasUpperCase) {
+    return 'Password must contain an uppercase letter';
+  }
+  if (!hasLowerCase) {
+    return 'Password must contain a lowercase letter';
+  }
+  if (!hasNumber) {
+    return 'Password must contain a number';
+  }
+  return null;
+};
+
+// ========== REGISTER ==========
+
+exports.register = async (req, res) => {
   try {
-    const { name, email, password, role, university, course, company } = req.body;
+    const { email, password, name } = req.body;
 
-    console.log('Registration attempt:', { name, email, role, company });
-
-    // Basic validation - only name, email, password are required
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide: name, email, and password'
-      });
+    // Validate email format
+    if (!validateEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
     }
 
-    // University is only required for STUDENTS
-    if (role === 'STUDENT' && !university) {
-      return res.status(400).json({
-        success: false,
-        message: 'University is required for students'
-      });
+    // Validate password strength
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
     }
 
-    // Company is only required for CLIENTS
-    if (role === 'CLIENT' && !company) {
-      return res.status(400).json({
-        success: false,
-        message: 'Company name is required for clients'
-      });
-    }
-
-    // Check if user exists
+    // Check if user already exists
     const existingUser = await prisma.user.findUnique({
       where: { email }
     });
 
     if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: 'User already exists'
-      });
+      return res.status(400).json({ message: 'User already exists' });
     }
 
     // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Create user data
-    const userData = {
-      name,
-      email,
-      password: hashedPassword,
-      role: role || 'STUDENT'
-    };
-
-    // Add role-specific fields
-    if (role === 'STUDENT') {
-      userData.university = university || '';
-      userData.course = course || '';
-    } else if (role === 'CLIENT') {
-      userData.company = company || '';
-    }
-
-    // Save user
+    // Create user - ALWAYS default to USER role
     const user = await prisma.user.create({
-      data: userData
+      data: {
+        email,
+        password: hashedPassword,
+        name: name?.trim() || 'User',
+        role: 'USER'
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true
+      }
     });
 
-    console.log('User created:', user.id, 'Role:', user.role);
-
-    // Generate token
+    // Generate JWT
     const token = jwt.sign(
-      { id: user.id, role: user.role },
-      process.env.JWT_SECRET,
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'mysecretkey123',
       { expiresIn: '7d' }
     );
 
     res.status(201).json({
-      success: true,
+      message: 'User registered successfully',
       token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
+      user
     });
+
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error: ' + error.message
-    });
+    res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-const login = async (req, res) => {
+// ========== LOGIN ==========
+
+exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide email and password'
-      });
+    // Validate email format
+    if (!validateEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
     }
 
+    // Find user
     const user = await prisma.user.findUnique({
       where: { email }
     });
 
     if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
+    // Check password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
+    // Generate JWT
     const token = jwt.sign(
-      { id: user.id, role: user.role },
-      process.env.JWT_SECRET,
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'mysecretkey123',
       { expiresIn: '7d' }
     );
 
+    // Return user without password
+    const { password: _, ...userWithoutPassword } = user;
+
     res.json({
-      success: true,
+      message: 'Login successful',
       token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
+      user: userWithoutPassword
     });
+
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-const getCurrentUser = async (req, res) => {
+// ========== GET CURRENT USER ==========
+
+exports.getMe = async (req, res) => {
   try {
+    // Check if user exists on request
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
     const user = await prisma.user.findUnique({
-      where: { id: req.user.id }
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true
+      }
     });
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
-    });
+    res.json(user);
+
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    res.status(500).json({ message: 'Internal server error' });
   }
 };
 
-module.exports = { register, login, getCurrentUser };
+// ========== UPDATE USER ==========
+
+exports.updateUser = async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const userId = req.user.id;
+
+    // Check if user exists
+    const existingUser = await prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!existingUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Update user
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: name?.trim() || existingUser.name,
+        email: email || existingUser.email
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true
+      }
+    });
+
+    res.json({
+      message: 'User updated successfully',
+      user: updatedUser
+    });
+
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ========== GET ALL USERS (Admin only) ==========
+
+exports.getAllUsers = async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Access denied. Admin only.' });
+    }
+
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json(users);
+
+  } catch (error) {
+    console.error('Get all users error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};

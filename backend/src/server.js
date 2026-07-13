@@ -1,33 +1,63 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('./config/prisma'); // Shared Prisma instance
+const errorHandler = require('./middleware/errorHandler');
 
-const prisma = new PrismaClient();
 dotenv.config();
 
-// Routes
+// Routes - Update paths to use src/routes
 const authRoutes = require('./routes/auth');
 const jobRoutes = require('./routes/jobs');
 const userRoutes = require('./routes/users');
 
 const app = express();
 const httpServer = createServer(app);
+
+// ========== SOCKET.IO SETUP ==========
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:3000",
-    methods: ["GET", "POST"]
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
-// Middleware
-app.use(cors());
+// ========== MIDDLEWARE ==========
+// Security headers
+app.use(helmet());
+
+// CORS with environment variable
+app.use(cors({
+  origin: process.env.CLIENT_URL || "http://localhost:3000",
+  credentials: true
+}));
+
+// JSON parser
 app.use(express.json());
 
-// Routes
-app.use('/api/auth', authRoutes);
+// ========== RATE LIMITING ==========
+// Global rate limiter
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per IP
+  message: 'Too many requests. Please try again later.'
+});
+app.use('/api', globalLimiter);
+
+// Stricter rate limiter for auth routes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 requests per IP
+  message: 'Too many login attempts. Please try again later.'
+});
+
+// ========== ROUTES ==========
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/jobs', jobRoutes);
 app.use('/api/users', userRoutes);
 
@@ -80,7 +110,7 @@ io.on('connection', (socket) => {
       console.log(`💬 Global message from ${senderId} to ${receiverId}`);
     } catch (error) {
       console.error('Message error:', error);
-      socket.emit('message_error', error.message);
+      socket.emit('message_error', 'Failed to send message');
     }
   });
 
@@ -105,6 +135,7 @@ io.on('connection', (socket) => {
       socket.emit('chat_history', messages);
     } catch (error) {
       console.error('History error:', error);
+      socket.emit('chat_history_error', 'Failed to load chat history');
     }
   });
 
@@ -205,7 +236,7 @@ io.on('connection', (socket) => {
       console.log(`💬 Job message from ${senderId} for application ${applicationId}`);
     } catch (error) {
       console.error('Job message error:', error);
-      socket.emit('message_error', error.message);
+      socket.emit('message_error', 'Failed to send job message');
     }
   });
 
@@ -225,6 +256,7 @@ io.on('connection', (socket) => {
       socket.emit('job_chat_history', messages);
     } catch (error) {
       console.error('Job history error:', error);
+      socket.emit('job_chat_history_error', 'Failed to load job chat history');
     }
   });
 
@@ -283,6 +315,35 @@ io.on('connection', (socket) => {
   });
 });
 
+// ========== ERROR HANDLING ==========
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
+// Global error handler
+app.use(errorHandler);
+
+// ========== GRACEFUL SHUTDOWN ==========
+process.on('SIGTERM', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  await prisma.$disconnect();
+  httpServer.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  await prisma.$disconnect();
+  httpServer.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+// ========== START SERVER ==========
 const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);

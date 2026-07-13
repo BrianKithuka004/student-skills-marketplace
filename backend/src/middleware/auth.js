@@ -22,10 +22,12 @@ const authenticate = async (req, res, next) => {
       });
     }
 
+    // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'mysecretkey123');
     
+    // Find user by ID from token (decoded.id)
     const user = await prisma.user.findUnique({
-      where: { id: decoded.userId }
+      where: { id: decoded.id }
     });
 
     if (!user) {
@@ -35,13 +37,13 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    req.userId = user.id;
+    // ✅ Attach user to request for controllers to use
     req.user = user;
+    req.userId = user.id;
+    
     next();
   } catch (error) {
-    if (error.name !== 'JsonWebTokenError' && error.name !== 'TokenExpiredError') {
-      console.error('Authentication error:', error);
-    }
+    console.error('Authentication error:', error);
     
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
@@ -59,8 +61,7 @@ const authenticate = async (req, res, next) => {
 
     res.status(500).json({
       success: false,
-      message: 'Authentication failed.',
-      error: error.message
+      message: 'Authentication failed.'
     });
   }
 };
